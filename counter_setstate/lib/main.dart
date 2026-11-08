@@ -2,13 +2,14 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
-
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+
 import 'package:cross_file/cross_file.dart';
 import 'package:share_plus/share_plus.dart';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
 import 'counter_data.dart';
 import 'counter_database.dart';
 import 'counter_style.dart';
@@ -338,102 +339,150 @@ class _CounterHomeState extends State<CounterHome> {
     }
   }
 
-  Future<void> shareCurrentCounter() async {
-    if (sharing || loading || counters.isEmpty || selectedId == null) return;
+Future<void> shareCurrentCounter() async {
+  if (sharing || loading || counters.isEmpty || selectedId == null) return;
 
-    setState(() => sharing = true);
+  setState(() => sharing = true);
 
-    final counter = currentCounter;
-    final displayName = userNameController.text.trim();
-    final date = currentDate;
-    final captureKey = GlobalKey();
-    bool captureScheduled = false;
+  final counter = currentCounter;
+  final displayName = userNameController.text.trim();
+  final date = currentDate;
+  final captureKey = GlobalKey();
 
-    try {
-      await showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        barrierColor: Colors.black54,
-        builder: (dialogContext) {
-          if (!captureScheduled) {
-            captureScheduled = true;
+  try {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black54,
+      builder: (dialogContext) {
+        WidgetsBinding.instance.addPostFrameCallback((_) async {
+          try {
+            // Give the dialog route time to finish its first paint/animation.
+            await Future<void>.delayed(
+              const Duration(milliseconds: 300),
+            );
 
-            WidgetsBinding.instance.addPostFrameCallback((_) async {
-              try {
-                final renderObject =
-                    captureKey.currentContext?.findRenderObject();
+            // Wait until Flutter has completed the frame.
+            await WidgetsBinding.instance.endOfFrame;
 
-                if (renderObject is! RenderRepaintBoundary) {
-                  throw Exception('Could not prepare the counter image.');
-                }
+            if (!dialogContext.mounted) return;
 
-                final image = await renderObject.toImage(pixelRatio: 3);
-                final byteData =
-                    await image.toByteData(format: ui.ImageByteFormat.png);
-                image.dispose();
+            final renderObject =
+                captureKey.currentContext?.findRenderObject();
 
-                if (byteData == null) {
-                  throw Exception('Could not create PNG image.');
-                }
+            if (renderObject is! RenderRepaintBoundary) {
+              throw Exception(
+                'Could not prepare the counter image.',
+              );
+            }
 
-                final Uint8List pngBytes =
-                    byteData.buffer.asUint8List();
+            // Make sure the boundary has actually been painted.
+            if (renderObject.debugNeedsPaint) {
+              await Future<void>.delayed(
+                const Duration(milliseconds: 100),
+              );
 
-                if (dialogContext.mounted) {
-                  Navigator.of(dialogContext).pop();
-                }
+              await WidgetsBinding.instance.endOfFrame;
+            }
 
-                await SharePlus.instance.share(
-                  ShareParams(
-                    title: 'Tasbih Counter',
-                    files: [
-                      XFile.fromData(
-                        pngBytes,
-                        mimeType: 'image/png',
-                      ),
-                    ],
-                    fileNameOverrides: ['tasbih-counter.png'],
-                  ),
-                );
-              } catch (e) {
-                if (dialogContext.mounted) {
-                  Navigator.of(dialogContext).pop();
-                }
-                if (mounted) showMessage('Could not share PNG: $e');
-              }
-            });
+            if (renderObject.debugNeedsPaint) {
+              throw Exception(
+                'Counter image is not ready yet.',
+              );
+            }
+
+            final image = await renderObject.toImage(
+              pixelRatio: 3.0,
+            );
+
+            final byteData = await image.toByteData(
+              format: ui.ImageByteFormat.png,
+            );
+
+            image.dispose();
+
+            if (byteData == null) {
+              throw Exception(
+                'Could not create PNG image.',
+              );
+            }
+
+            final Uint8List pngBytes =
+                byteData.buffer.asUint8List();
+
+            final tempDir = await getTemporaryDirectory();
+
+            final file = File(
+              '${tempDir.path}/tasbih_counter.png',
+            );
+
+            await file.writeAsBytes(
+              pngBytes,
+              flush: true,
+            );
+
+            if (dialogContext.mounted) {
+              Navigator.of(dialogContext).pop();
+            }
+
+            await Share.shareXFiles(
+              [
+                XFile(file.path),
+              ],
+              text: 'Tasbih Counter',
+            );
+          } catch (e) {
+            debugPrint('Share image error: $e');
+
+            if (dialogContext.mounted) {
+              Navigator.of(dialogContext).pop();
+            }
+
+            if (mounted) {
+              showMessage(
+                'Could not share PNG: $e',
+              );
+            }
           }
+        });
 
-          final screenWidth = MediaQuery.of(dialogContext).size.width;
-          final cardSize =
-              (screenWidth - 48).clamp(240.0, 320.0).toDouble();
+        final screenWidth =
+            MediaQuery.of(dialogContext).size.width;
 
-          return Dialog(
-            backgroundColor: Colors.transparent,
-            elevation: 0,
-            insetPadding: const EdgeInsets.all(12),
-            child: RepaintBoundary(
-              key: captureKey,
-              child: _ShareCounterCard(
-                size: cardSize,
-                counterName: counter.name.trim().isEmpty
-                    ? 'Untitled Counter'
-                    : counter.name.trim(),
-                count: counter.count,
-                date: date,
-                userName: displayName,
-                background: counter.style.background,
-                accent: counter.style.accent,
-                textColor: counter.style.text,
-              ),
+        final cardSize =
+            (screenWidth - 48)
+                .clamp(240.0, 320.0)
+                .toDouble();
+
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          insetPadding: const EdgeInsets.all(12),
+          child: RepaintBoundary(
+            key: captureKey,
+            child: _ShareCounterCard(
+              size: cardSize,
+              counterName:
+                  counter.name.trim().isEmpty
+                      ? 'Untitled Counter'
+                      : counter.name.trim(),
+              count: counter.count,
+              date: date,
+              userName: displayName,
+              background: counter.style.background,
+              accent: counter.style.accent,
+              textColor: counter.style.text,
             ),
-          );
-        },
-      );
-    } finally {
-      if (mounted) setState(() => sharing = false);
+          ),
+        );
+      },
+    );
+  } finally {
+    if (mounted) {
+      setState(() => sharing = false);
     }
   }
+}
 
   void showMessage(String message) {
     if (!mounted) return;
